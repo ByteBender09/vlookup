@@ -12,15 +12,36 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+html {
+  color-scheme: light;
+}
+
+/* Slim, subtle scrollbar for scroll areas */
+.scrollbar-slim {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(24, 24, 27, 0.35) transparent; /* zinc-900-ish */
+}
+.scrollbar-slim::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-slim::-webkit-scrollbar-thumb {
+  background: rgba(24, 24, 27, 0.25);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scrollbar-slim::-webkit-scrollbar-thumb:hover {
+  background: rgba(24, 24, 27, 0.35);
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
