@@ -13,6 +13,8 @@ export type Table = {
   rows: Record<string, unknown>[];
 };
 
+const SRC_ROW_KEY = "__srcRow" as const;
+
 function safeString(v: unknown): string {
   if (v == null) return "";
   if (typeof v === "string") return v;
@@ -61,12 +63,127 @@ export function parseSheetToTable(parsed: ParsedWorkbook, sheetName: string): Ta
 
     const obj: Record<string, unknown> = {};
     for (let c = 0; c < headers.length; c++) obj[headers[c]!] = r[c] ?? "";
+    // Keep original Excel row number (1-based) so we can later export sorted rows
+    // while preserving the original sheet formatting.
+    obj[SRC_ROW_KEY] = i + 1;
 
     const isEmpty = headers.every((h) => normalizeKey(obj[h]) === "");
     if (!isEmpty) rows.push(obj);
   }
 
   return { fileName: parsed.fileName, sheetName, headers, rows };
+}
+
+function cloneCell(cell: XLSX.CellObject): XLSX.CellObject {
+  // xlsx-js-style cells are plain objects; structuredClone isn't always available in all runtimes.
+  return JSON.parse(JSON.stringify(cell)) as XLSX.CellObject;
+}
+
+function getSrcRowNumber(row: Record<string, unknown>): number | null {
+  const v = row[SRC_ROW_KEY];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+export function buildSortedWorkbookPreserveSheetFormat(params: {
+  parsed: ParsedWorkbook;
+  sheetName: string;
+  sortedRows: Record<string, unknown>[];
+  headerRowNumber?: number; // 1-based, default 1
+}): XLSX.WorkBook | null {
+  const headerRowNumber = params.headerRowNumber ?? 1;
+  const wsOrig = params.parsed.workbook.Sheets[params.sheetName];
+  if (!wsOrig) return null;
+
+  const origRef = wsOrig["!ref"];
+  if (!origRef) return null;
+  const origRange = XLSX.utils.decode_range(origRef);
+
+  const dataStartRowNumber = headerRowNumber + 1; // 1-based
+  const dataStartR0 = dataStartRowNumber - 1; // 0-based
+
+  // Map source (0-based row) -> destination (0-based row)
+  const mapping = new Map<number, number>();
+  const orderedSrcRows: number[] = [];
+  for (const r of params.sortedRows) {
+    const srcRowNumber = getSrcRowNumber(r);
+    if (srcRowNumber == null) continue;
+    const srcR0 = srcRowNumber - 1;
+    if (srcR0 < dataStartR0) continue;
+    orderedSrcRows.push(srcR0);
+  }
+
+  if (orderedSrcRows.length === 0) return null;
+
+  for (let i = 0; i < orderedSrcRows.length; i++) {
+    mapping.set(orderedSrcRows[i]!, dataStartR0 + i);
+  }
+
+  const wsNew: XLSX.WorkSheet = {};
+
+  // Copy over workbook-level sheet metadata
+  const metaKeys = ["!cols", "!rows", "!outline", "!autofilter", "!freeze", "!margins", "!protect"] as const;
+  for (const k of metaKeys) {
+    const v = (wsOrig as any)[k];
+    if (v != null) (wsNew as any)[k] = JSON.parse(JSON.stringify(v));
+  }
+
+  // Copy header area (all rows before dataStartR0) exactly
+  for (let R = origRange.s.r; R < dataStartR0; R++) {
+    for (let C = origRange.s.c; C <= origRange.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: R, c: C });
+      const cell = (wsOrig as any)[a] as XLSX.CellObject | undefined;
+      if (cell) (wsNew as any)[a] = cloneCell(cell);
+    }
+  }
+
+  // Copy data rows in new order
+  for (const [srcR0, dstR0] of mapping.entries()) {
+    for (let C = origRange.s.c; C <= origRange.e.c; C++) {
+      const srcAddr = XLSX.utils.encode_cell({ r: srcR0, c: C });
+      const dstAddr = XLSX.utils.encode_cell({ r: dstR0, c: C });
+      const cell = (wsOrig as any)[srcAddr] as XLSX.CellObject | undefined;
+      if (cell) (wsNew as any)[dstAddr] = cloneCell(cell);
+    }
+
+    // Preserve row formatting when available
+    const origRows = (wsOrig as any)["!rows"] as any[] | undefined;
+    if (origRows && origRows[srcR0]) {
+      const newRows = ((wsNew as any)["!rows"] as any[]) ?? [];
+      newRows[dstR0] = JSON.parse(JSON.stringify(origRows[srcR0]));
+      (wsNew as any)["!rows"] = newRows;
+    }
+  }
+
+  // Preserve merges: keep header merges; move single-row merges for mapped data rows; drop multi-row merges.
+  const merges = ((wsOrig as any)["!merges"] as XLSX.Range[] | undefined) ?? [];
+  const newMerges: XLSX.Range[] = [];
+  for (const m of merges) {
+    if (m.e.r < dataStartR0) {
+      newMerges.push(JSON.parse(JSON.stringify(m)));
+      continue;
+    }
+    if (m.s.r !== m.e.r) continue; // multi-row merge won't survive reordering safely
+    const dstR0 = mapping.get(m.s.r);
+    if (dstR0 == null) continue;
+    newMerges.push({
+      s: { r: dstR0, c: m.s.c },
+      e: { r: dstR0, c: m.e.c },
+    });
+  }
+  if (newMerges.length) (wsNew as any)["!merges"] = newMerges;
+
+  // Update ref to include header + sorted rows.
+  const lastDataR0 = dataStartR0 + orderedSrcRows.length - 1;
+  wsNew["!ref"] = XLSX.utils.encode_range({
+    s: { r: origRange.s.r, c: origRange.s.c },
+    e: { r: Math.max(origRange.e.r, lastDataR0), c: origRange.e.c },
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsNew, params.sheetName);
+  return wb;
 }
 
 export function buildWorkbookFromRows(params: {

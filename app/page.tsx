@@ -9,6 +9,7 @@ import { Modal } from "./components/ui/Modal";
 import { Spinner } from "./components/ui/Spinner";
 import { Stepper } from "./components/ui/Stepper";
 import {
+  buildSortedWorkbookPreserveSheetFormat,
   downloadWorkbook,
   findDuplicateKeys,
   formatForExport,
@@ -289,20 +290,29 @@ export default function Home() {
         targetKeys: selectedKeys,
         appendUnmatched,
       });
-      const dupKeys =
-        (mode === "keep_all" || keepAllEnabled) && selectedKeys.length
-          ? new Set(findDuplicateKeys(res.sortedRows, selectedKeys).map((d) => d.key))
-          : undefined;
-      const wb = formatForExport({
-        headers: effectiveTable2.headers,
-        rows: res.sortedRows,
-        keysToFront: selectedKeys,
-        highlightDuplicateKeys: dupKeys,
-        duplicateKeyColumns: dupKeys ? selectedKeys : undefined,
-        sttByKeyColumns: selectedKeys.length ? selectedKeys : undefined,
-        forceText: true,
-      });
-      downloadWorkbook(wb, `sorted_${baseName(effectiveTable2.fileName)}.xlsx`);
+      // Prefer preserving File 2 original formatting by reordering rows on the original sheet.
+      const preserved =
+        wb2 && sheet2
+          ? buildSortedWorkbookPreserveSheetFormat({ parsed: wb2, sheetName: sheet2, sortedRows: res.sortedRows })
+          : null;
+      if (preserved) {
+        downloadWorkbook(preserved, `sorted_${baseName(effectiveTable2.fileName)}.xlsx`);
+      } else {
+        const dupKeys =
+          (mode === "keep_all" || keepAllEnabled) && selectedKeys.length
+            ? new Set(findDuplicateKeys(res.sortedRows, selectedKeys).map((d) => d.key))
+            : undefined;
+        const wb = formatForExport({
+          headers: effectiveTable2.headers,
+          rows: res.sortedRows,
+          keysToFront: selectedKeys,
+          highlightDuplicateKeys: dupKeys,
+          duplicateKeyColumns: dupKeys ? selectedKeys : undefined,
+          sttByKeyColumns: selectedKeys.length ? selectedKeys : undefined,
+          forceText: true,
+        });
+        downloadWorkbook(wb, `sorted_${baseName(effectiveTable2.fileName)}.xlsx`);
+      }
       return;
     }
 
@@ -330,14 +340,21 @@ export default function Home() {
       for (let i = 0; i < effectiveTable2.rows.length; i++) if (!used.has(i)) out.push(effectiveTable2.rows[i]!);
     }
 
-    const wb = formatForExport({
-      headers: effectiveTable2.headers,
-      rows: out,
-      keysToFront: selectedKeys,
-      // after manual resolve, renumber STT top-down
-      forceText: true,
-    });
-    downloadWorkbook(wb, `sorted_${baseName(effectiveTable2.fileName)}.xlsx`);
+    // For manual match, still prefer preserving File 2 original sheet formatting.
+    const preserved =
+      wb2 && sheet2 ? buildSortedWorkbookPreserveSheetFormat({ parsed: wb2, sheetName: sheet2, sortedRows: out }) : null;
+    if (preserved) {
+      downloadWorkbook(preserved, `sorted_${baseName(effectiveTable2.fileName)}.xlsx`);
+    } else {
+      const wb = formatForExport({
+        headers: effectiveTable2.headers,
+        rows: out,
+        keysToFront: selectedKeys,
+        // after manual resolve, renumber STT top-down
+        forceText: true,
+      });
+      downloadWorkbook(wb, `sorted_${baseName(effectiveTable2.fileName)}.xlsx`);
+    }
   }
 
   function runMerge(mode?: "keep_all" | "manual") {
@@ -462,12 +479,21 @@ export default function Home() {
 
         <Modal
           open={dupModalOpen && selectedKeys.length > 0 && hasBothTables && hasDup && !dupResolved}
-          onClose={() => setDupModalOpen(false)}
+          onClose={() => {
+            setDupModalOpen(false);
+            setPendingAction(null);
+          }}
           title="Phát hiện trùng khóa"
           description="Chỉ hiển thị các key bị trùng. Chọn 1 cách xử lý để tiếp tục."
           footer={
             <div className="flex w-full flex-col gap-3 sm:flex-row sm:justify-end">
-              <Button variant="secondary" onClick={() => setDupModalOpen(false)}>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setDupModalOpen(false);
+                  setPendingAction(null);
+                }}
+              >
                 Xem lại
               </Button>
               <Button
